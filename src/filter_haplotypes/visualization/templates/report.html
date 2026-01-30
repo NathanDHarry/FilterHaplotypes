@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FilterHaplotypes Report</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f9; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1, h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .full-width { grid-column: span 2; }
+        .plot-container { border: 1px solid #eee; border-radius: 4px; padding: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>FilterHaplotypes: Assembly De-duplication Report</h1>
+        
+        <h2>Assembly Impact Summary</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>Initial Assembly</th>
+                    <th>Filtered Assembly</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Total Bases</td><td>{{ stats_initial['Total Bases'] }}</td><td>{{ stats_filtered['Total Bases'] }}</td></tr>
+                <tr><td>Number of Contigs</td><td>{{ stats_initial['Num Contigs'] }}</td><td>{{ stats_filtered['Num Contigs'] }}</td></tr>
+                {% for nx in ['N50', 'N60', 'N70', 'N80', 'N90', 'N100'] %}
+                <tr>
+                    <td>{{ nx }} (Contigs)</td>
+                    <td>{{ stats_initial[nx] }} ({{ stats_initial[nx+'_count'] }})</td>
+                    <td>{{ stats_filtered[nx] }} ({{ stats_filtered[nx+'_count'] }})</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if busco_initial %}
+        <h2>BUSCO Impact Summary</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>Initial Assembly</th>
+                    <th>Filtered Assembly</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>Complete (Single)</td><td>{{ busco_initial['complete_single'] }}</td><td>{{ busco_filtered['complete_single'] }}</td></tr>
+                <tr><td>Duplicated</td><td>{{ busco_initial['duplicated'] }}</td><td>{{ busco_filtered['duplicated'] }}</td></tr>
+            </tbody>
+        </table>
+        {% endif %}
+
+        <h2>Filtering Decision Logic Summary</h2>
+        <div class="grid">
+            <div>
+                <h3>Retained Reasons</h3>
+                <table>
+                    <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+                    <tbody>
+                        {% for reason, count in retained_counts.items() %}
+                        <tr><td>{{ reason }}</td><td>{{ count }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div>
+                <h3>Discarded Reasons</h3>
+                <table>
+                    <thead><tr><th>Reason</th><th>Count</th></tr></thead>
+                    <tbody>
+                        {% for reason, count in discarded_counts.items() %}
+                        <tr><td>{{ reason }}</td><td>{{ count }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <h2>Summary Plots</h2>
+        <div class="grid">
+            <div class="plot-container">
+                <h3>Mash Distances Distribution</h3>
+                <div id="mash-plot"></div>
+            </div>
+            <div class="plot-container">
+                <h3>L-Curve</h3>
+                <div id="l-curve-plot"></div>
+            </div>
+            <div class="plot-container full-width">
+                <h3>GC-content BlobPlot</h3>
+                <div id="gc-plot"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const mashPlotData = {{ mash_plot_json | safe }};
+        Plotly.newPlot('mash-plot', mashPlotData.data, mashPlotData.layout);
+
+        const lCurvePlotData = {{ l_curve_json | safe }};
+        Plotly.newPlot('l-curve-plot', lCurvePlotData.data, lCurvePlotData.layout);
+
+        const gcPlotData = {{ gc_plot_json | safe }};
+        Plotly.newPlot('gc-plot', gcPlotData.data, gcPlotData.layout);
+    </script>
+</body>
+</html>

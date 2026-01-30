@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "filter_haplotypes"
+version = "0.1.0"
+description = "A tool for reference-based de-duplication of genome assemblies."
+authors = [
+    { name = "Junie", email = "junie@jetbrains.com" }
+]
+dependencies = [
+    "biopython",
+    "pandas",
+    "plotly",
+    "jinja2",
+    "scipy",
+    "numpy"
+]
+requires-python = ">=3.8"
+
+[project.scripts]
+filter_haplotypes = "filter_haplotypes.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
