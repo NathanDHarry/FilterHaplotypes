@@ -70,7 +70,7 @@ def parse_paf(paf_path: str, min_mq: int = 10) -> pd.DataFrame:
 def get_primary_targets(df: pd.DataFrame) -> pd.DataFrame:
     """
     Identify the primary target locus for each query contig.
-    Selection: Highest AS, then longest alignment length, then alphabetical target_id.
+    Selection: Highest 90th percentile of AS, then longest alignment length, then alphabetical target_id.
 
     :param df: Filtered PAF DataFrame.
     :return: DataFrame with only primary target records for each query_id.
@@ -78,15 +78,22 @@ def get_primary_targets(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Sort to ensure best record is first for each query_id
-    # We want descending AS, descending aln_len, ascending target_id
-    df_sorted = df.sort_values(
-        by=['query_id', 'AS', 'aln_len', 'target_id'],
+    # Calculate 90th percentile of AS per target for each query
+    # and also get the max aln_len per target (for tie-breaking)
+    target_stats = df.groupby(['query_id', 'target_id']).agg(
+        p90_as=('AS', lambda x: np.percentile(x, 90)),
+        max_aln_len=('aln_len', 'max')
+    ).reset_index()
+
+    # Sort to find the best target per query
+    # Primary: 90th percentile AS, Secondary: max aln_len, Tertiary: alphabetical target_id
+    target_stats_sorted = target_stats.sort_values(
+        by=['query_id', 'p90_as', 'max_aln_len', 'target_id'],
         ascending=[True, False, False, True]
     )
     
     # For each query_id, define primary target
-    primary_targets = df_sorted.groupby('query_id').first().reset_index()[['query_id', 'target_id']]
+    primary_targets = target_stats_sorted.groupby('query_id').first().reset_index()[['query_id', 'target_id']]
     
     # Filter original df to keep only records aligning to primary targets
     merged = df.merge(primary_targets, on=['query_id', 'target_id'], how='inner')
