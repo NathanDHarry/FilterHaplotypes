@@ -7,7 +7,7 @@ and the iterative tournament algorithm for redundancy resolution.
 import numpy as np
 import pandas as pd
 from scipy.stats import gaussian_kde
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple
 from src.filter_haplotypes.core.models import ContigSummary, Status
 import logging
 
@@ -198,13 +198,87 @@ def get_overlapping_pairs(summary_list: List[ContigSummary], min_overlap: int = 
                     
     return overlapping_pairs
 
+def get_adjusted_score(contig: ContigSummary, busco_bonus_factor: float = 0.0, all_contigs: List[ContigSummary] = None) -> float:
+    """
+    Calculate adjusted score with optional BUSCO density bonus.
+    
+    Strategy 1: BUSCO Density Bonus Scoring
+    adjusted_score = sum_normalized_score × (1 + busco_density × bonus_factor)
+    
+    The busco_density calculation only considers BUSCO ids (genes) that are unique (single-copy) 
+    to the query contig (i.e., not present on other ALIGNED_RETAINED contigs).
+    
+    :param contig: ContigSummary object.
+    :param busco_bonus_factor: Bonus factor for BUSCO density (default: 0.0 = disabled).
+    :param all_contigs: List of all ContigSummary objects (for unique BUSCO checking).
+    :return: Adjusted score.
+    """
+    base_score = contig.sum_normalized_score
+    
+    if busco_bonus_factor == 0.0 or contig.busco_genes is None or len(contig.busco_genes) == 0:
+        return base_score
+    
+    # Count unique BUSCO genes (not present on other ALIGNED_RETAINED contigs)
+    unique_busco_count = len(contig.busco_genes)
+    if all_contigs is not None:
+        # Collect all BUSCO ids from other ALIGNED_RETAINED contigs
+        other_busco_ids = set()
+        for other in all_contigs:
+            if other.status == Status.ALIGNED_RETAINED and other.query_id != contig.query_id:
+                if other.busco_genes:
+                    other_busco_ids.update(other.busco_genes)
+        
+        # Count only unique BUSCO ids
+        unique_busco_count = sum(1 for busco_id in contig.busco_genes if busco_id not in other_busco_ids)
+    
+    # Calculate BUSCO density using unique BUSCOs (BUSCOs per megabase)
+    contig_length_mb = contig.query_length / 1_000_000.0
+    busco_density = unique_busco_count / contig_length_mb if contig_length_mb > 0 else 0.0
+    
+    # Apply bonus
+    adjusted_score = base_score * (1.0 + busco_density * busco_bonus_factor)
+    
+    return adjusted_score
+
+def count_unique_single_copy_orthologs(contig: ContigSummary, all_contigs: List[ContigSummary], exclude_ids: set) -> int:
+    """
+    Count unique single-copy orthologs (BUSCO ids) for a contig.
+    
+    A unique single-copy ortholog is a BUSCO id that appears zero times on contigs with 
+    status = ALIGNED_RETAINED other than those in exclude_ids.
+    
+    :param contig: The contig to count unique orthologs for.
+    :param all_contigs: List of all ContigSummary objects in the assembly.
+    :param exclude_ids: Set of query_ids to exclude from the count (typically C and O).
+    :return: Count of unique single-copy orthologs.
+    """
+    if not contig.busco_genes:
+        return 0
+    
+    # Collect all BUSCO ids from ALIGNED_RETAINED contigs excluding those in exclude_ids
+    other_busco_ids = set()
+    for other in all_contigs:
+        if other.status == Status.ALIGNED_RETAINED and other.query_id not in exclude_ids:
+            if other.busco_genes:
+                other_busco_ids.update(other.busco_genes)
+    
+    # Count BUSCO ids in contig that don't appear in other_busco_ids
+    unique_count = 0
+    for busco_id in contig.busco_genes:
+        if busco_id not in other_busco_ids:
+            unique_count += 1
+    
+    return unique_count
+
 def run_tournament_on_target(
     contigs: List[ContigSummary],
     mash_lookup: Dict[str, Dict[str, float]],
     distance_threshold: float,
     min_overlap: int = 1,
     min_size_safeguard: float = 0.5,
-    max_tournament_iterations: int = 100000
+    max_tournament_iterations: int = 100000,
+    busco_bonus_factor: float = 0.0,
+    all_contigs: List[ContigSummary] = None
 ) -> List[ContigSummary]:
     """
     Phase 5 Step 7 & 8: Perform tournament for a group of contigs aligned to the same target.
@@ -215,6 +289,8 @@ def run_tournament_on_target(
     :param min_overlap: Minimum overlap bases.
     :param min_size_safeguard: Ratio for size-based retention.
     :param max_tournament_iterations: Maximum iterations for the tournament loop.
+    :param busco_bonus_factor: Bonus factor for BUSCO density scoring (default: 0.0 = disabled).
+    :param all_contigs: List of all ContigSummary objects (for BUSCO ortholog checking).
     :return: Updated list of ContigSummary objects.
     """
     if not contigs:
@@ -236,10 +312,13 @@ def run_tournament_on_target(
         # 3. Active Status (O must be RETAINED)
         if O.status != Status.ALIGNED_RETAINED: return False
 
-        # 4. Superior Score
-        if O.sum_normalized_score > C.sum_normalized_score:
+        # 4. Superior Score (using adjusted scores with BUSCO bonus)
+        score_C = get_adjusted_score(C, busco_bonus_factor, all_contigs)
+        score_O = get_adjusted_score(O, busco_bonus_factor, all_contigs)
+        
+        if score_O > score_C:
             pass
-        elif O.sum_normalized_score == C.sum_normalized_score:
+        elif score_O == score_C:
             # Tie-break: earlier in sorted list wins. 
             # We will sort 'contigs' at the start of tournament.
             # So if O appears before C in 'contigs', O wins.
@@ -260,6 +339,15 @@ def run_tournament_on_target(
         # 6. Size Safeguard
         if O.query_length < min_size_safeguard * C.query_length:
             return False
+
+        # 7. BUSCO Ortholog Rule
+        # O can only disqualify C if C has <= unique single-copy orthologs compared to O
+        if all_contigs is not None:
+            exclude_ids = {C.query_id, O.query_id}
+            unique_orthologs_C = count_unique_single_copy_orthologs(C, all_contigs, exclude_ids)
+            unique_orthologs_O = count_unique_single_copy_orthologs(O, all_contigs, exclude_ids)
+            if unique_orthologs_C > unique_orthologs_O:
+                return False
 
         return True
 
@@ -299,16 +387,19 @@ def run_tournament_on_target(
                 any_overlap = True
                 # If it overlaps with a retained contig but isn't discarded, record why
                 if O.status == Status.ALIGNED_RETAINED:
-                    if C.sum_normalized_score > O.sum_normalized_score:
+                    score_C = get_adjusted_score(C, busco_bonus_factor, all_contigs)
+                    score_O = get_adjusted_score(O, busco_bonus_factor, all_contigs)
+                    
+                    if score_C > score_O:
                         C.retained_reason["Score"] = True
                     
                     dist = mash_lookup.get(C.query_id, {}).get(O.query_id)
                     # Divergent enough to be kept despite lower score?
-                    if dist is not None and dist > distance_threshold and C.sum_normalized_score < O.sum_normalized_score:
+                    if dist is not None and dist > distance_threshold and score_C < score_O:
                         C.retained_reason["Mash"] = True
                     
                     # Too large to be discarded by a much smaller contig?
-                    if O.query_length < min_size_safeguard * C.query_length and C.sum_normalized_score < O.sum_normalized_score:
+                    if O.query_length < min_size_safeguard * C.query_length and score_C < score_O:
                         C.retained_reason["Size"] = True
             
             # If no overlaps at all, it's unique to this locus
@@ -388,12 +479,15 @@ def run_tournament_on_target(
                     
                     any_overlap = True
                     if R.status == Status.ALIGNED_RETAINED:
-                        if C.sum_normalized_score > R.sum_normalized_score:
+                        score_C = get_adjusted_score(C, busco_bonus_factor)
+                        score_R = get_adjusted_score(R, busco_bonus_factor)
+                        
+                        if score_C > score_R:
                             C.retained_reason["Score"] = True
                         dist = mash_lookup.get(C.query_id, {}).get(R.query_id)
-                        if dist is not None and dist > distance_threshold and C.sum_normalized_score < R.sum_normalized_score:
+                        if dist is not None and dist > distance_threshold and score_C < score_R:
                             C.retained_reason["Mash"] = True
-                        if R.query_length < min_size_safeguard * C.query_length and C.sum_normalized_score < R.sum_normalized_score:
+                        if R.query_length < min_size_safeguard * C.query_length and score_C < score_R:
                             C.retained_reason["Size"] = True
                 
                 if not any_overlap:

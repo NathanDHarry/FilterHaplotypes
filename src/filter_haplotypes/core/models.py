@@ -30,7 +30,8 @@ class ContigSummary:
     discarded_reason: Dict[str, bool] = field(default_factory=lambda: {
         "Round1": False,
         "OrphanOverride": False,
-        "Mash_Redundancy": False
+        "Mash_Redundancy": False,
+        "GC": False
     })
     retained_reason: Dict[str, bool] = field(default_factory=lambda: {
         "Score": False,

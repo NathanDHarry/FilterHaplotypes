@@ -4,7 +4,7 @@ Handles reading Mash TSV output and building high-performance lookup structures.
 """
 
 import pandas as pd
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional
 import logging
 
 logger = logging.getLogger(__name__)

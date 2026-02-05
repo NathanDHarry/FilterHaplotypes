@@ -21,6 +21,23 @@
     <div class="container">
         <h1>FilterHaplotypes: Assembly De-duplication Report</h1>
         
+        {% if run_parameters %}
+        <h2>Run Configuration</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Parameter</th>
+                    <th>Value</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for param, value in run_parameters.items() %}
+                <tr><td>{{ param }}</td><td>{{ value }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        
         <h2>Assembly Impact Summary</h2>
         <table>
             <thead>

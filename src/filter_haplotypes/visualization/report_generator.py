@@ -4,12 +4,11 @@ Generates the final TSV summary, filtered FASTA, and interactive HTML dashboard.
 """
 
 from Bio import SeqIO
-import json
 import plotly.graph_objects as go
 import multiprocessing
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Set
 from src.filter_haplotypes.core.models import ContigSummary, Status
 from src.filter_haplotypes.utils.stats import calculate_assembly_stats, calculate_l_curve
 import pandas as pd
@@ -49,7 +48,8 @@ def generate_report(
     busco_initial: Dict[str, Any],
     busco_filtered: Dict[str, Any],
     output_dir: Path,
-    threads: int = 1
+    threads: int = 1,
+    run_parameters: Dict[str, Any] = None
 ):
     """
     Phase 7 Step 10: Generate all output files and the interactive HTML report.
@@ -62,6 +62,7 @@ def generate_report(
     :param busco_filtered: Filtered BUSCO stats.
     :param output_dir: Directory to save outputs.
     :param threads: Number of threads for parallel metric calculation.
+    :param run_parameters: Dictionary of configurable parameters used for the run.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -157,7 +158,8 @@ def generate_report(
         mash_plot_json=mash_plot_json,
         l_curve_json=l_curve_json,
         gc_plot_json=gc_plot_json,
-        distance_threshold=distance_threshold
+        distance_threshold=distance_threshold,
+        run_parameters=run_parameters if run_parameters else {}
     )
     
     with open(output_dir / 'report.html', 'w', encoding='utf-8') as f:

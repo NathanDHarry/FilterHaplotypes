@@ -5,11 +5,11 @@ FilterHaplotypes is a command-line tool designed to remove redundant contigs (ha
 ## Algorithmic Phases
 
 ### Phase 1: Pre-processing
-Retains quality alignments (`MappingQuality` >= 10) and identifies the primary `target` locus for each query contig based on the highest Alignment Score (`AS:i`).
+Retains quality alignments (`MappingQuality` >= 20) and identifies the primary `target` locus for each query contig based on the highest Alignment Score (`AS:i`).
 - Potential problem: If a contig aligns to multiple targets, it may be difficult to determine the primary target locus. The highest alignment score is probably not the best choice. Look into using the highest 90th percentile `AS:i` score (among all targets' alignments) instead.
 
 ### Phase 2: Contig Summary Initialization
-Creates a central data structure (`ContigSummary`) for every contig in the de-novo assembly. Aligned contigs are linked to their primary targets.
+Creates a central data structure (`ContigSummary`) for every contig in the de-novo assembly. Aligned contigs are linked to their primary targets. At the end of this phase, a GC content filter is applied: the median GC% is calculated from contigs in the 90th percentile for length, and any contig whose GC% deviates by more than 5 percentage points from this median is discarded as a potential contaminant.
 
 ### Phase 3: Alignment Filtering and Scoring
 Uses a greedy tiling algorithm to resolve overlapping alignments for each contig on its primary target. A final normalized alignment score is calculated using only these non-redundant alignments.
@@ -22,7 +22,7 @@ Runs a multi-pass tournament within each genomic locus. Contigs compete based on
 - May want to include some consideration of BUSCO genes on competing contigs.
 
 ### Phase 6: Unaligned Contig Handling
-Identifies contigs that did not align to the reference and screens them for redundancy against all retained contigs using Mash distances.
+Identifies contigs that did not align to the reference and screens them for redundancy against all retained contigs using Mash distances. Can be bypassed with the `--aligned-only` flag, which discards all unaligned contigs.
 
 ### Phase 7: Reporting
 Generates the de-duplicated FASTA assembly, a detailed TSV summary of all filtering decisions, and an interactive HTML report with assembly statistics, BUSCO completeness, and diagnostic plots (Mash distribution, BlobPlot, L-curve).
@@ -62,7 +62,8 @@ filter_haplotypes -p alignments.paf -m mash_distances.dist -f contigs.fasta -o o
 ### Optional Arguments
 - `-b, --busco`: Optional BUSCO `full_table.tsv` for completeness reporting.
 - `-o, --output`: Directory for results (Default: `./output`).
-- `--min-mq`: Mapping Quality threshold (Default: 10).
+- `--min-mq`: Mapping Quality threshold (Default: 20).
+- `--aligned-only`: Discard all unaligned contigs (bypass Phase 6).
 - `--min-overlap`: Minimum overlap bases to trigger competition (Default: 1).
 - `--min-size-safeguard`: Ratio for size-based retention (Default: 0.50).
 - `--distance-threshold`: Mash distance threshold (Overrides estimator if supplied).

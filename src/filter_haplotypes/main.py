@@ -7,10 +7,8 @@ to generating the final interactive report and filtered assembly.
 import argparse
 import logging
 import multiprocessing
-import os
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
 
 from src.filter_haplotypes.parsers.fasta_parser import parse_fasta
 from src.filter_haplotypes.parsers.paf_parser import parse_paf, get_primary_targets
@@ -43,12 +41,15 @@ def main():
     # Optional
     parser.add_argument("-b", "--busco", help="Optional BUSCO full_table.tsv")
     parser.add_argument("-o", "--output", default="./output", help="Output directory for results")
+    parser.add_argument("--no-fasta", action="store_true", help="Skip writing filtered_assembly.fasta output file")
     
     # Configurable
-    parser.add_argument("--min-mq", type=int, default=10, help="Mapping Quality threshold")
+    parser.add_argument("--min-mq", type=int, default=20, help="Mapping Quality threshold")
+    parser.add_argument("--aligned-only", action="store_true", help="Discard all unaligned contigs (bypass Phase 6)")
     parser.add_argument("--min-overlap", type=int, default=1, help="Minimum overlap bases to trigger overlap condition")
     parser.add_argument("--min-size-safeguard", type=float, default=0.50, help="Ratio for size-based retention")
     parser.add_argument("--distance-threshold", type=float, help="Mash distance threshold (Overrides estimator if supplied)")
+    parser.add_argument("--busco-bonus-factor", type=float, default=0.0, help="BUSCO density bonus factor for scoring (0.0 = disabled, 0.01-0.02 = conservative, 0.05 = moderate, 0.10 = aggressive)")
     parser.add_argument("--threads", type=int, default=max(1, multiprocessing.cpu_count() - 1), help="Number of CPU cores for parallel processing")
     parser.add_argument("--max-tournament-iterations", type=int, default=100000, help="Maximum iterations for tournament loop")
 
@@ -93,6 +94,40 @@ def main():
                 # primary_target_id
                 target_id = primary_paf_df[primary_paf_df['query_id'] == q_id]['target_id'].iloc[0]
                 summary.target_id = target_id
+        
+        # GC filtering: Calculate median GC% of contigs in 90th percentile for length
+        logger.info("Phase 2: Applying GC content filter...")
+        import numpy as np
+        
+        # Calculate 90th percentile threshold for contig length
+        all_lengths = [c.query_length for c in summary_list]
+        length_p90 = np.percentile(all_lengths, 90)
+        
+        # Get contigs in the 90th percentile
+        contigs_p90 = [c for c in summary_list if c.query_length >= length_p90]
+        
+        # Calculate median GC% of those contigs
+        gc_values_p90 = [c.gc_content for c in contigs_p90]
+        median_gc = np.median(gc_values_p90)
+        
+        logger.info(f"90th percentile length threshold: {length_p90:.2f} bp")
+        logger.info(f"Median GC% of contigs in 90th percentile: {median_gc:.2f}%")
+        
+        # Filter contigs with GC% deviation > 5 percentage points
+        gc_filtered_count = 0
+        for c in summary_list:
+            if c.status in [Status.ALIGNED_RETAINED, Status.UNALIGNED_RETAINED]:
+                gc_deviation = abs(c.gc_content - median_gc)
+                if gc_deviation > 5.0:
+                    # Update status to discarded
+                    if c.status == Status.ALIGNED_RETAINED:
+                        c.status = Status.ALIGNED_DISCARDED
+                    else:
+                        c.status = Status.UNALIGNED_DISCARDED
+                    c.discarded_reason["GC"] = True
+                    gc_filtered_count += 1
+        
+        logger.info(f"Contigs filtered due to GC deviation: {gc_filtered_count}")
 
         # Phase 3: Alignment Filtering and Scoring
         logger.info("Phase 3: Tiling and scoring alignments...")
@@ -147,7 +182,7 @@ def main():
         target_items = list(target_groups.values())
         with multiprocessing.Pool(args.threads, initializer=worker_configurer, initargs=(log_queue,)) as pool:
             tournament_results = pool.starmap(run_tournament_on_target, [
-                (group, mash_lookup, dist_threshold, args.min_overlap, args.min_size_safeguard, args.max_tournament_iterations)
+                (group, mash_lookup, dist_threshold, args.min_overlap, args.min_size_safeguard, args.max_tournament_iterations, args.busco_bonus_factor, summary_list)
                 for group in target_items
             ])
         
@@ -160,50 +195,60 @@ def main():
                 original.retained_reason = updated_cs.retained_reason
 
         # Phase 6: Unaligned Contig Handling
-        logger.info("Phase 6: Screening unaligned contigs...")
         unaligned = [c for c in summary_list if c.status == Status.UNALIGNED_RETAINED]
-        # Sort by length descending as requested
-        unaligned.sort(key=lambda x: x.query_length, reverse=True)
         
-        retained_so_far = [c for c in summary_list if c.status == Status.ALIGNED_RETAINED]
-        
-        current_retained = list(retained_so_far)
-        
-        with multiprocessing.Pool(args.threads, initializer=worker_configurer, initargs=(log_queue,)) as pool:
-            screened_unaligned = pool.starmap(screen_unaligned_contig, [
-                (u, current_retained, mash_lookup, dist_threshold) for u in unaligned
-            ])
-        
-        # Now update summary_list and handle U-U redundancy for those still RETAINED
-        unaligned_retained_after_aligned_check = [u for u in screened_unaligned if u.status == Status.UNALIGNED_RETAINED]
-        
-        final_unaligned_retained = []
-        for u in unaligned_retained_after_aligned_check:
-            is_redundant = False
-            for r in final_unaligned_retained:
-                dist = get_mash_distance(mash_lookup, u.query_id, r.query_id)
-                if dist is not None and dist < dist_threshold:
-                    u.status = Status.UNALIGNED_DISCARDED
-                    u.disqualifier = r.query_id
-                    u.discarded_reason["Mash_Redundancy"] = True
-                    is_redundant = True
-                    break
-            if not is_redundant:
-                final_unaligned_retained.append(u)
-                
-        # Update the summary list with results from Phase 6
-        for u in screened_unaligned:
-            original = query_to_summary[u.query_id]
-            original.status = u.status
-            original.disqualifier = u.disqualifier
-            original.discarded_reason = u.discarded_reason
+        if args.aligned_only:
+            logger.info("Phase 6: Discarding all unaligned contigs (--aligned-only flag set)...")
+            # Mark all unaligned contigs as UNALIGNED_DISCARDED
+            for u in unaligned:
+                u.status = Status.UNALIGNED_DISCARDED
+            
+            num_unaligned_total = len(unaligned)
+            logger.info(f"Unaligned contigs discarded: {num_unaligned_total} (100.00%)")
+        else:
+            logger.info("Phase 6: Screening unaligned contigs...")
+            # Sort by length descending as requested
+            unaligned.sort(key=lambda x: x.query_length, reverse=True)
+            
+            retained_so_far = [c for c in summary_list if c.status == Status.ALIGNED_RETAINED]
+            
+            current_retained = list(retained_so_far)
+            
+            with multiprocessing.Pool(args.threads, initializer=worker_configurer, initargs=(log_queue,)) as pool:
+                screened_unaligned = pool.starmap(screen_unaligned_contig, [
+                    (u, current_retained, mash_lookup, dist_threshold) for u in unaligned
+                ])
+            
+            # Now update summary_list and handle U-U redundancy for those still RETAINED
+            unaligned_retained_after_aligned_check = [u for u in screened_unaligned if u.status == Status.UNALIGNED_RETAINED]
+            
+            final_unaligned_retained = []
+            for u in unaligned_retained_after_aligned_check:
+                is_redundant = False
+                for r in final_unaligned_retained:
+                    dist = get_mash_distance(mash_lookup, u.query_id, r.query_id)
+                    if dist is not None and dist < dist_threshold:
+                        u.status = Status.UNALIGNED_DISCARDED
+                        u.disqualifier = r.query_id
+                        u.discarded_reason["Mash_Redundancy"] = True
+                        is_redundant = True
+                        break
+                if not is_redundant:
+                    final_unaligned_retained.append(u)
+                    
+            # Update the summary list with results from Phase 6
+            for u in screened_unaligned:
+                original = query_to_summary[u.query_id]
+                original.status = u.status
+                original.disqualifier = u.disqualifier
+                original.discarded_reason = u.discarded_reason
 
-        num_unaligned_total = len(unaligned)
-        num_unaligned_retained = len(final_unaligned_retained)
-        if num_unaligned_total > 0:
-            perc_unaligned_retained = (num_unaligned_retained / num_unaligned_total) * 100
-            logger.info(f"Unaligned contigs retained: {num_unaligned_retained} ({perc_unaligned_retained:.2f}%)")
-            logger.info(f"Unaligned contigs discarded: {num_unaligned_total - num_unaligned_retained} ({100 - perc_unaligned_retained:.2f}%)")
+            num_unaligned_total = len(unaligned)
+            num_unaligned_retained = len(final_unaligned_retained)
+            if num_unaligned_total > 0:
+                perc_unaligned_retained = (num_unaligned_retained / num_unaligned_total) * 100
+                logger.info(f"Unaligned contigs retained: {num_unaligned_retained} ({perc_unaligned_retained:.2f}%)")
+                logger.info(f"Unaligned contigs discarded: {num_unaligned_total - num_unaligned_retained} ({100 - perc_unaligned_retained:.2f}%)")
 
         # Phase 7: Reporting
         logger.info("Phase 7: Generating reports...")
@@ -213,6 +258,23 @@ def main():
         retained_ids = {c.query_id for c in summary_list if c.status in [Status.ALIGNED_RETAINED, Status.UNALIGNED_RETAINED]}
         busco_filtered = get_busco_counts(args.busco, retained_ids) if args.busco else {}
         
+        # Collect run parameters for the report
+        run_parameters = {
+            'PAF File': args.paf,
+            'Mash File': args.mash,
+            'FASTA File': args.fasta,
+            'BUSCO File': args.busco if args.busco else 'Not provided',
+            'Output Directory': str(output_dir),
+            'Min Mapping Quality': args.min_mq,
+            'Aligned Only': args.aligned_only,
+            'Min Overlap': args.min_overlap,
+            'Min Size Safeguard': args.min_size_safeguard,
+            'Distance Threshold': f"{dist_threshold:.4f} ({method})",
+            'BUSCO Bonus Factor': args.busco_bonus_factor,
+            'Threads': args.threads,
+            'Max Tournament Iterations': args.max_tournament_iterations
+        }
+        
         generate_report(
             summary_list,
             overlap_distances,
@@ -221,12 +283,15 @@ def main():
             busco_initial,
             busco_filtered,
             output_dir,
-            args.threads
+            args.threads,
+            run_parameters
         )
         
-        write_filtered_fasta(Path(args.fasta), output_dir / 'filtered_assembly.fasta', retained_ids)
-        
-        logger.info(f"Pipeline complete. Results saved in {output_dir}")
+        if not args.no_fasta:
+            write_filtered_fasta(Path(args.fasta), output_dir / 'filtered_assembly.fasta', retained_ids)
+            logger.info(f"Pipeline complete. Results saved in {output_dir}")
+        else:
+            logger.info(f"Pipeline complete. Results saved in {output_dir} (filtered_assembly.fasta skipped)")
     except Exception as e:
         logger.error(f"Critical failure: {e}")
         sys.exit(1)
